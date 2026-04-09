@@ -1,0 +1,31 @@
+# =============================================================================
+# Prometheus Configuration
+#
+# Scrapes operational metrics from the IIoT Worker every 15 seconds.
+# Place this file in infra/ alongside docker-compose.yml.
+#
+# Metrics exposed by the worker (port 9091):
+#   - iiot_messages_total       : Total MQTT messages processed, by topic/status.
+#   - iiot_pipeline_seconds     : Pipeline processing duration histogram.
+#   - iiot_buffer_size          : Current in-memory buffer depth, by topic.
+#   - iiot_errors_total         : Error count by type and component.
+# =============================================================================
+
+global:
+  # How frequently Prometheus scrapes each target.
+  scrape_interval: 15s
+  # How frequently alerting rules are evaluated (kept in sync with scrape).
+  evaluation_interval: 15s
+
+scrape_configs:
+
+  # ---------------------------------------------------------------------------
+  # IIoT Worker
+  #
+  # Target  : worker:9091  (internal Docker network name)
+  # Endpoint: /metrics      (default prometheus_client path)
+  # ---------------------------------------------------------------------------
+  - job_name: 'iiot_worker'
+    static_configs:
+      - targets: ['worker:9091']
+    metrics_path: /metrics

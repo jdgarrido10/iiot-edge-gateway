@@ -1,0 +1,283 @@
+# =============================================================================
+# Docker Compose — IIoT Edge Stack
+#
+# Services (lightest → heaviest):
+#   mosquitto   MQTT broker              :1883 (TCP), :9001 (WebSocket)
+#   nodered     Flow-based ETL UI        :1880
+#   worker      Python IIoT pipeline     :8765 (API), :9091 (Prometheus)
+#   prometheus  Metrics collection       :9093 (host) → :9090 (container)
+#   grafana     Dashboards               :3000
+#   minio       Object storage           :9000 (API), :9090 (Console)
+#   influxdb    Time-series database     :8086
+#
+# NOTE: MinIO occupies port 9090 on the host (console UI).
+#       Prometheus is therefore mapped to 9093 on the host to avoid collision.
+#
+# All services share the bridge network 'industrial_net' for name-based
+# DNS resolution (e.g. worker:9091, mosquitto:1883).
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # MOSQUITTO
+  # Lightweight MQTT broker. Handles all inbound telemetry from field devices.
+  # Config and persistence are mounted from ./mosquitto.
+  # ---------------------------------------------------------------------------
+  mosquitto:
+    image: eclipse-mosquitto:2.0.18
+    container_name: edge_mqtt
+    restart: unless-stopped
+    user: root
+    ports:
+      - "1883:1883"   # MQTT TCP
+      - "9001:9001"   # MQTT over WebSocket
+    volumes:
+      - ./mosquitto:/mosquitto
+    deploy:
+      resources:
+        limits:
+          cpus: '${MQTT_CPU_LIMIT}'
+          memory: '${MQTT_MEM_LIMIT}'
+    logging: &default-logging
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - industrial_net
+
+  # ---------------------------------------------------------------------------
+  # NODE-RED
+  # Visual flow editor used for device-side data pre-processing and routing.
+  # Shares the worker_data volume so both services can access the same files.
+  # ---------------------------------------------------------------------------
+  nodered:
+    image: nodered/node-red:4.0.5
+    container_name: edge_nodered
+    restart: unless-stopped
+    user: root
+    ports:
+      - "1880:1880"
+    environment:
+      - TZ=${TIMEZONE}
+      - NODE_OPTIONS=--max-old-space-size=460
+    deploy:
+      resources:
+        limits:
+          cpus: '${NODERED_CPU_LIMIT}'
+          memory: '${NODERED_MEM_LIMIT}'
+    volumes:
+      - ./nodered_data:/data
+      - ./worker_data:/app/data
+    logging: *default-logging
+    depends_on:
+      - mosquitto
+    networks:
+      - industrial_net
+
+  # ---------------------------------------------------------------------------
+  # MINIO
+  # S3-compatible object storage for raw CSV batches and daily reports.
+  # Console UI runs on :9090 — API on :9000.
+  # GOMEMLIMIT is set to ~90% of the container memory limit to avoid OOM kills.
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2024-01-31T20-20-33Z
+    container_name: edge_minio
+    restart: unless-stopped
+    user: root
+    command: server /data --console-address ":9090"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9090:9090"   # Web console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # CRITICAL: must be ~90% of the container memory limit to prevent OOM kills.
+      GOMEMLIMIT: "900MiB"
+    deploy:
+      resources:
+        limits:
+          cpus: '${MINIO_CPU_LIMIT}'
+          memory: '${MINIO_MEM_LIMIT}'
+    volumes:
+      - ./minio_data:/data
+    logging: *default-logging
+    networks:
+      - industrial_net
+
+  # ---------------------------------------------------------------------------
+  # WORKER
+  # Core Python service: MQTT ingestion → ETL pipeline → MinIO/InfluxDB sink.
+  #   :8765  HTTP API and health check endpoint.
+  #   :9091  Prometheus metrics endpoint (scraped by the prometheus service).
+  # Waits for InfluxDB to pass its health check before starting.
+  # ---------------------------------------------------------------------------
+  worker:
+    build: ../src/worker
+    container_name: edge_worker
+    restart: unless-stopped
+    user: root
+    ports:
+      - "8765:8765"   # HTTP API / health check
+      - "9091:9091"   # Prometheus metrics
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: '${WORKER_CPU_LIMIT}'
+          memory: '${WORKER_MEM_LIMIT}'
+    depends_on:
+      mosquitto:
+        condition: service_started
+      minio:
+        condition: service_started
+      influxdb:
+        condition: service_healthy
+    environment:
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - SMTP_FROM_NAME=${SMTP_FROM_NAME}
+      - MQTT_BROKER=mosquitto
+      - TZ=${TIMEZONE}
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - MINIO_BUCKET=raw-data
+      - INFLUX_URL=http://influxdb:8086
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN}
+      - DOCKER_INFLUXDB_INIT_ORG=${DOCKER_INFLUXDB_INIT_ORG}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${DOCKER_INFLUXDB_INIT_BUCKET}
+      - BATCH_SIZE=${BATCH_SIZE}
+      - BATCH_TIMEOUT=${BATCH_TIMEOUT}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+    volumes:
+      - ./worker_data:/app/data
+    logging: *default-logging
+    networks:
+      - industrial_net
+
+  # ---------------------------------------------------------------------------
+  # INFLUXDB
+  # Time-series database for weight metrics and production KPIs.
+  # Initialised automatically on first boot via DOCKER_INFLUXDB_INIT_* vars.
+  # Health check ensures dependent services wait for a ready instance.
+  # ---------------------------------------------------------------------------
+  influxdb:
+    image: influxdb:2.7
+    container_name: edge_influxdb
+    restart: unless-stopped
+    user: root
+    ports:
+      - "8086:8086"
+    deploy:
+      resources:
+        limits:
+          cpus: '${INFLUX_CPU_LIMIT}'
+          memory: '${INFLUX_MEM_LIMIT}'
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUX_USER}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUX_PASSWORD}
+      - DOCKER_INFLUXDB_INIT_ORG=${DOCKER_INFLUXDB_INIT_ORG}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${DOCKER_INFLUXDB_INIT_BUCKET}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN}
+      - INFLUXD_QUERY_TIMEOUT=60s
+      - INFLUXD_HTTP_IDLE_TIMEOUT=10s
+    volumes:
+      - ./influxdb_data:/var/lib/influxdb2
+      - ./influxdb_config:/etc/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging: *default-logging
+    networks:
+      - industrial_net
+
+  # ---------------------------------------------------------------------------
+  # PROMETHEUS
+  # Pulls metrics from the worker every 15 seconds (see prometheus.yml).
+  # Time-series data is persisted in the 'prometheus_data' volume (15-day retention).
+  #
+  # Host port : 9093  (9090 is already taken by the MinIO console)
+  # Internal  : prometheus:9090  (used by Grafana as datasource URL)
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: edge_prometheus
+    restart: unless-stopped
+    ports:
+      - "9093:9090"   # Exposed on 9093 — MinIO occupies 9090 on the host
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - worker
+    logging: *default-logging
+    networks:
+      - industrial_net
+
+  # ---------------------------------------------------------------------------
+  # GRAFANA
+  # Visualisation layer for both Prometheus metrics and InfluxDB time-series.
+  # Datasource for Prometheus: http://prometheus:9090
+  # Datasource for InfluxDB  : http://influxdb:8086
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana-oss:11.4.0
+    container_name: edge_grafana
+    restart: unless-stopped
+    user: root
+    ports:
+      - "3000:3000"
+    deploy:
+      resources:
+        limits:
+          cpus: '${GRAFANA_CPU_LIMIT}'
+          memory: '${GRAFANA_MEM_LIMIT}'
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD}
+      - GF_INSTALL_PLUGINS=volkovlabs-form-panel,volkovlabs-echarts-panel
+      - GF_PANELS_DISABLE_SANITIZE_HTML=true
+      - GF_FEATURE_TOGGLES_ENABLE=xyChart
+    volumes:
+      - grafana_storage:/var/lib/grafana
+      - ./grafana_data/png:/usr/share/grafana/public/img/tfg
+    depends_on:
+      - prometheus
+    logging: *default-logging
+    networks:
+      - industrial_net
+
+# =============================================================================
+# Networks
+# =============================================================================
+
+networks:
+  industrial_net:
+    driver: bridge
+    name: industrial_net
+
+# =============================================================================
+# Volumes
+# =============================================================================
+
+volumes:
+  grafana_storage:    # Grafana dashboards, plugins and settings.
+  prometheus_data:    # Prometheus TSDB — 15-day metric retention.
