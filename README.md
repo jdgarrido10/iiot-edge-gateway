@@ -41,19 +41,19 @@ Deployed in a live factory, under real failures, solving real production problem
 
 ## Table of Contents
 
-- [What it does](#-what-it-does)
+- [What it does](#what-it-does)
 - [Architecture](#️-architecture)
-- [Project Structure](#-project-structure)
-- [Technical Highlights](#-technical-highlights)
-- [Stack](#️-stack)
+- [Project Structure](#project-structure)
+- [Technical Highlights](#technical-highlights)
+- [Stack](stack)
 - [Business Impact](#-business-impact)
 - [Dashboards](#-dashboards)
-- [Quick Start](#-quick-start)
-- [Configuration](#️-configuration)
-- [Running the Tests](#-running-the-tests)
-- [API Reference](#-api-reference)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Running the Tests](#running-the-tests)
+- [API Reference](#api-reference)
 - [Future Improvements](#️-future-improvements)
-- [Looking for opportunities](#-looking-for-opportunities)
+- [Looking for opportunities](#looking-for-opportunities)
 
 ---
 
