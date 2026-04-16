@@ -19,7 +19,7 @@ with validation and feedback from the plant's industrial engineer.
 
 Currently looking for roles in **IIoT / Edge Computing / Data Engineering**
 for industrial environments.  
-[LinkedIn](https://www.linkedin.com/in/joaquin-dominguez-garrido-2b96b0272/) · [Email](jdominguezg06@gmail.com)
+[LinkedIn](https://www.linkedin.com/in/joaquin-dominguez-garrido/) · [Email](jdominguezg06@gmail.com)
 
 ---
 
